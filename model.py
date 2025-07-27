@@ -259,6 +259,8 @@ class DDIMCustomScheduler(DDIMScheduler):
         # 7. compute x_t without "random noise" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
         prev_sample = alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
 
+        prev_sample_mean = prev_sample.detach().clone()
+
         if eta > 0:
             if variance_noise is not None and generator is not None:
                 raise ValueError(
@@ -286,6 +288,8 @@ class DDIMCustomScheduler(DDIMScheduler):
             return (
                 prev_sample,
                 pred_original_sample,
+                prev_sample_mean,
+                std_dev_t,
             )
 
         return DDIMSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample)
@@ -339,6 +343,7 @@ class TreeSearchStableDiffusionPipeline(
     @torch.no_grad()
     def __call__(
         self,
+        search_method: str = "TreeG-SC",
         active_size: int = 1,
         branch_size: int = 1,
         t_start: int = 0,
@@ -647,39 +652,118 @@ class TreeSearchStableDiffusionPipeline(
 
                 is_guidance = i >= t_start and i < t_end
 
-                latents = self.scheduler.step(
-                    noise_pred,
-                    t,
-                    latents,
-                    branch_size=branch_size if is_guidance else 1,
-                    **extra_step_kwargs,
-                    return_dict=False,
-                )[0]
+                ### here, different methods
 
-                ### evaluate and select
-                if is_guidance and branch_size > 1:
-                    if i + 1 < len(self.scheduler.timesteps):
-                        prev_t = self.scheduler.timesteps[i + 1]
-                        latents, rewards = self.evaluate_then_select(
-                            latents,
-                            prev_t,
-                            sample_size,
-                            active_size,
-                            prompt_embeds_for_tree_search,
-                            generator,
-                            output_type,
-                        )
+                if search_method == "TreeG-SC":
+                    latents = self.scheduler.step(
+                        noise_pred,
+                        t,
+                        latents,
+                        branch_size=branch_size if is_guidance else 1,
+                        **extra_step_kwargs,
+                        return_dict=False,
+                    )[0]
 
-                    else:
-                        latents, rewards = self.select_clean(
-                            images=latents,
-                            sample_size=sample_size,
-                            top_size=active_size,
-                            output_type=output_type,
-                        )
-                    
-                    rewards_mean = rewards.mean().item()
-                    progress_bar.set_postfix({'reward': f'{rewards_mean:.3f}'}, refresh=False)
+                    ### evaluate and select
+                    if is_guidance and branch_size > 1:
+                        if i + 1 < len(self.scheduler.timesteps):
+                            prev_t = self.scheduler.timesteps[i + 1]
+                            latents, rewards = self.evaluate_then_select(
+                                latents,
+                                prev_t,
+                                sample_size,
+                                active_size,
+                                prompt_embeds_for_tree_search,
+                                generator,
+                                output_type,
+                            )
+
+                        else:
+                            latents, rewards = self.select_clean(
+                                images=latents,
+                                sample_size=sample_size,
+                                top_size=active_size,
+                                output_type=output_type,
+                            )
+                        
+                        rewards_mean = rewards.mean().item()
+                        progress_bar.set_postfix({'reward': f'{rewards_mean:.3f}'}, refresh=False)
+
+                elif search_method == "TreeG-SD":
+                    outputs = self.scheduler.step(
+                        noise_pred,
+                        t,
+                        latents,
+                        branch_size=1,
+                        **extra_step_kwargs,
+                        return_dict=False,
+                    )
+                    latents = outputs[0]
+                    pred_x0 = outputs[1]
+                    mean_pred = outputs[2]
+                    sigma = outputs[3]
+                    if is_guidance and branch_size > 1:
+                        # pred_x0 = self.scheduler.get_original_sample(noise_pred, t, latent_model_input)
+                        if i + 1 < len(self.scheduler.timesteps):
+                            SD_kwargs=kwargs.get("SD_kwargs", {})
+                            guided_outputs = self.xclean_branch_and_select(
+                                t = t,
+                                pred_xstart= pred_x0,
+                                mean_pred=mean_pred,
+                                num_samples=branch_size,
+                                active_size=active_size,
+                                output_type=output_type,
+                                generator=generator,
+                                SD_kwargs= SD_kwargs,
+                            )
+
+                                
+                            guided_x0 = guided_outputs['guided_x0']
+                            rewards = guided_outputs['rewards']
+                            mean_pred = guided_outputs['mean_pred']
+
+
+                            if SD_kwargs['dsg']:
+                                epsilon = 1e-10
+                                g_ascent = guided_x0 - guided_outputs['original_x0']
+                                g_ascent_norm = torch.linalg.norm(g_ascent.view(g_ascent.size(0), -1), dim=1)
+                                g_ascent_norm = g_ascent_norm.unsqueeze(1).unsqueeze(2).unsqueeze(3)
+
+                                _, c, h, w = mean_pred.size()
+                                r = torch.sqrt(torch.tensor(c * h * w)) * sigma
+                                d_star = r * g_ascent / (g_ascent_norm + epsilon)
+                                d_sample = torch.randn_like(mean_pred) * sigma
+
+                                guidance_rate = SD_kwargs.get('guidance_rate', 1.)
+                                mix_direction = d_sample + guidance_rate * (d_star - d_sample)
+                                mix_direction_norm = torch.linalg.norm(mix_direction.view(mix_direction.size(0), -1), dim=1)
+                                mix_direction_norm = mix_direction_norm.unsqueeze(1).unsqueeze(2).unsqueeze(3)
+                                mix_step = mix_direction / (mix_direction_norm + epsilon) * r
+
+                                sample = mean_pred + mix_step
+
+                                latents = sample
+                        
+                        else:
+                            latents, rewards = self.select_clean(
+                                images=latents,
+                                sample_size=sample_size,
+                                top_size=active_size,
+                                output_type=output_type,
+                            )
+
+                            rewards = rewards.mean().item()
+
+                        ## set the progress bar postfix
+                        if isinstance(rewards, list):
+                            ## show all rewards for bar postfix
+                            rewards_all = [f'{reward:.3f}' for reward in rewards]
+                            progress_bar.set_postfix({'reward': rewards_all}, refresh=False)
+                        else:
+                            progress_bar.set_postfix({'reward': f'{rewards:.3f}'}, refresh=False)
+
+                        
+
 
 
                 if callback_on_step_end is not None:
@@ -809,9 +893,79 @@ class TreeSearchStableDiffusionPipeline(
         images = images.view(-1, *images.shape[2:])
 
         return images, topk_rewards
-
-
     
+    def xclean_branch_and_select(
+            self,
+            t,
+            pred_xstart,
+            mean_pred,
+            num_samples, ## branch_size
+            active_size,
+            output_type,
+            generator,
+            SD_kwargs = None,
+    ):
+               
+        batch = pred_xstart.shape[0] // active_size
+        _, C, H, W = pred_xstart.shape
+
+        n_iter = SD_kwargs.get("n_iter", 1)
+        
+        rewards_list = []
+        
+        pred_xstart_new = pred_xstart.detach().clone()
+
+        for _ in range(n_iter):
+            
+            sample = pred_xstart_new.unsqueeze(1).expand(-1, num_samples, -1, -1, -1)
+            noise = torch.randn_like(sample)
+
+            alpha_bar_t = self.scheduler.alphas_cumprod[t]
+            scale_t = torch.sqrt(1 - alpha_bar_t)
+            pred_xstart_scale_t = scale_t / torch.sqrt(1+scale_t**2)
+            # pred_xstart_scale_t = 1.0 # to modify
+            var_scale = SD_kwargs.get("pred_xstart_scale", 1.)
+            
+
+            sample = sample + var_scale * pred_xstart_scale_t * noise
+            sample_ = sample.contiguous().view(-1, C, H, W)   # (batch*active_size*num_samples) x C x H x W
+
+
+            ### decode to image
+            if output_type != "latent":
+                images = self.vae.decode(sample_ / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                images = self.image_processor.postprocess(images, output_type="pt", do_denormalize=[True]*images.shape[0])
+                ### check input
+                # print(f"max value: {images.max()}, min value: {images.min()}")
+                rewards = self.reward_fn(images)
+            else:
+                rewards = self.reward_fn(sample_)
+            # print(rewards)
+            rewards = torch.tensor(rewards, device=pred_xstart.device)
+            rewards = rewards.view(batch, -1)
+            top_rewards, top_ind = torch.topk(rewards, active_size, dim=1, largest=True)
+
+           
+            sample = sample.contiguous().view(-1, C, H, W).contiguous().view(batch, -1, C, H, W)
+            pred_xstart_new = sample[torch.arange(batch).unsqueeze(-1), top_ind]
+            pred_xstart_new = pred_xstart_new.contiguous().view(-1, C, H, W)
+
+            ### get corresponding pred_xstart and mean_pred
+            pred_xstart = pred_xstart.unsqueeze(1).expand(-1, num_samples, -1, -1, -1)
+            pred_xstart = pred_xstart.contiguous().view(-1, C, H, W).contiguous().view(batch, -1, C, H, W)
+            pred_xstart = pred_xstart[torch.arange(batch).unsqueeze(-1), top_ind]
+            pred_xstart = pred_xstart.contiguous().view(-1, C, H, W)
+
+            mean_pred = mean_pred.unsqueeze(1).expand(-1, num_samples, -1, -1, -1)
+            mean_pred = mean_pred.contiguous().view(-1, C, H, W).contiguous().view(batch, -1, C, H, W)
+            mean_pred = mean_pred[torch.arange(batch).unsqueeze(-1), top_ind]
+            mean_pred = mean_pred.contiguous().view(-1, C, H, W)
+
+
+
+            rewards_list.append(top_rewards.mean().item())
+
+        return {'guided_x0': pred_xstart_new, 'original_x0':pred_xstart, 'mean_pred':mean_pred, 'rewards': rewards_list}
 
 
 

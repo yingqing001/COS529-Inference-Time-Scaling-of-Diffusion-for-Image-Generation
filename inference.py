@@ -89,6 +89,35 @@ def get_args_parser():
         default=1,
         help="The number of times to repeat the image generation.",
     )
+    parser.add_argument(
+        "--search_method",
+        type=str,
+        default="TreeG-SC",
+        help="The search method to use for the tree search.",
+    )
+    parser.add_argument(
+        "--pred_xstart_scale",
+        type=float,
+        default=1.0,
+        help="The scale for the predicted xstart in TreeG-SD.",
+    )
+    parser.add_argument(
+        "--n_iter",
+        type=int,
+        default=1,
+        help="The number of iterations for the TreeG-SD search method.",        
+    )
+    parser.add_argument(
+        "--dsg",
+        action="store_true",
+        help="Whether to use the DSG (Dynamic Search Graph) method in TreeG-SD.",
+    )
+    parser.add_argument(
+        "--guidance_rate",
+        type=float,
+        default=1.0,
+        help="The guidance rate for the diffusion process.",
+    )
  
 
     return parser
@@ -136,6 +165,17 @@ def main(args):
 
     generator = torch.Generator(device=device).manual_seed(seed)
 
+    print("Search Method:", args.search_method)
+    SD_kwargs = {}
+    if args.search_method == "TreeG-SD":
+        SD_kwargs = {
+            "pred_xstart_scale": args.pred_xstart_scale,
+            "n_iter": args.n_iter,
+            "dsg": args.dsg,
+            "guidance_rate": args.guidance_rate,
+        }
+        print("Hyperparameters for TreeG-SD:\n", SD_kwargs)
+
     print(f"active size {args.active_size} and branch size {args.branch_size}")
     # print(f"Prompt: {args.prompt}")
 
@@ -148,19 +188,24 @@ def main(args):
     rewards = []
     images_all = []
 
+    print(f"Guidance step: {args.t_start} to {args.t_end}")
+
     print(f"Prompts: {prompts}")
     
     for i, prompt in enumerate(prompts):
         print(f"Prompt: {prompt}")
         result, image_pt = pipeline(
+            search_method=args.search_method,
             active_size=args.active_size,
             branch_size=args.branch_size,
             t_start=args.t_start,
             t_end=args.t_end,
             prompt=prompt,
-            num_images_per_prompt=1,
+            num_images_per_prompt=5,
+            num_inference_steps=50,
             generator=generator,
             eta=1.0,
+            SD_kwargs=SD_kwargs,
         )
         images = result.images  # List[ PIL.Image.Image ]
 
@@ -173,21 +218,32 @@ def main(args):
         reward = reward_fn(image_pt)
         # print(f"Reward: {reward}")
 
-        rewards.append(reward.item())
-        print(f"Prompt: {prompt}, Reward: {reward.item()}")
+        
+        print(f"Prompt: {prompt}, Reward: {reward.mean().item()}")
+        rewards.append(torch.tensor(reward))
 
 
 
-    dirs = os.path.join(args.output_dir, args.reward_fn, f"active_{args.active_size}_branch_{args.branch_size}")
-    os.makedirs(dirs, exist_ok=True)
+    dirs = os.path.join(args.output_dir, args.reward_fn, args.search_method, f"seed_{args.seed}_active_{args.active_size}_branch_{args.branch_size}")
+    if args.search_method == "TreeG-SD":
+        dirs = os.path.join(dirs, f"pred_xstart_scale_{args.pred_xstart_scale}_n_iter_{args.n_iter}_guidance_rate_{args.guidance_rate}")
+    # os.makedirs(dirs, exist_ok=True)
 
     # print("rewards:", rewards)
     # print("images_all:", len(images_all))
 
+    # rewards are list of torch.Tensor (B,), to get (NB,)
+    rewards = torch.cat(rewards).cpu().numpy()
+    print(f"Shape of rewards: {rewards.shape}")
+
     ## get mean and std
     mean = np.mean(rewards)
     std = np.std(rewards)
+    dirs += f"_mean_{mean:.3f}"
+    os.makedirs(dirs, exist_ok=True)
+    print("------ Reward Statistics ------")
     print(f"Mean: {mean}, Std: {std}")
+    print("\n")
     ## save rewards
     stats = (args.active_size, args.branch_size, mean.item(), std.item())
     with open(os.path.join(dirs, "stats.pkl"), "wb") as f:
@@ -204,9 +260,9 @@ def main(args):
         print(f"Saving images to {images_dir}")
         for idx, image in enumerate(images_all):
             # print(idx)
-            file_path = os.path.join(images_dir, f"image_{idx:03d}_reward_{rewards[idx]:.3f}.png")
+            file_path = os.path.join(images_dir, f"image_{idx:03d}_reward_{rewards[idx].item():.3f}.png")
             image.save(file_path)
-            print(f"Saved {file_path}")
+            # print(f"Saved {file_path}")
 
 
 
