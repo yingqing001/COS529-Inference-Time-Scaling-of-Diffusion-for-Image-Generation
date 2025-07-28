@@ -933,7 +933,16 @@ class TreeSearchStableDiffusionPipeline(
 
             ### decode to image
             if output_type != "latent":
-                images = self.vae.decode(sample_ / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                ### cut to chunk
+                CHUNK_SIZE = 12
+                num_chunks = (sample_.shape[0] + CHUNK_SIZE - 1) // CHUNK_SIZE
+                sample_chunks = sample_.chunk(num_chunks, dim=0)
+                images = []
+                for chunk in sample_chunks:
+                    chunk_images = self.vae.decode(chunk / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                    images.append(chunk_images)
+                images = torch.cat(images, dim=0)
+                # images = self.vae.decode(sample_ / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
                 images = self.image_processor.postprocess(images, output_type="pt", do_denormalize=[True]*images.shape[0])
                 ### check input
                 # print(f"max value: {images.max()}, min value: {images.min()}")

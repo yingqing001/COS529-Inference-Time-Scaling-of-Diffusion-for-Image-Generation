@@ -1,23 +1,17 @@
 #!/bin/bash
-#SBATCH --job-name=tts_         # create a short name for your job
-#SBATCH --nodes=1                # node count
-#SBATCH --ntasks=1               # total number of tasks across all nodes
-#SBATCH --cpus-per-task=1        # cpu-cores per task (>1 if multi-threaded tasks)
-#SBATCH --gres=gpu:1             # number of gpus per node
-#SBATCH --time=04:59:00          # total run time limit (HH:MM:SS)
-#SBATCH --output=slurm_logs/%j.out
-#SBATCH --mail-type=begin        # send email when job begins
-#SBATCH --mail-type=fail
-#SBATCH --mail-type=end          # send email when job ends
-#SBATCH --mail-user=yg6736@princeton.edu
-#SBATCH --mem-per-cpu=50G         # memory per cpu-core (4G is default)
-#SBATCH --partition=pli
-#SBATCH --account=ai2_design
+#SBATCH --job-name=bash
+#SBATCH --output=output_slurm/%j.out
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=6
+#SBATCH --gres=gpu:1
+#SBATCH --time=40:30:00
+#SBATCH --account rfai
+
 
 
 module purge
-module load anaconda3/2024.10  
-source activate rnadiff
+source activate rqvae_3.11
 
 seed=0
 
@@ -53,17 +47,42 @@ branch_size=4
 search_method=TreeG-SD
 
 
-branch_size=8
+branch_size=4
+
 pred_xstart_scale=0.25
-n_iter=1
+n_iter=2
 
 guidance_rate=10.0
-python inference.py --dsg --guidance_rate $guidance_rate --pred_xstart_scale $pred_xstart_scale --n_iter $n_iter --search_method $search_method  --save_images --num_prompts $num_prompts --reward_fn $reward_fn  --t_start $t_start --t_end $t_end --active_size $active_size --branch_size $branch_size  --prompt "${prompt[@]}" --num_images $num_images --seed $seed --output_dir $output_dir
+
+# python inference.py --dsg --guidance_rate $guidance_rate --pred_xstart_scale $pred_xstart_scale --n_iter $n_iter --search_method $search_method  --save_images --num_prompts $num_prompts --reward_fn $reward_fn  --t_start $t_start --t_end $t_end --active_size $active_size --branch_size $branch_size  --prompt "${prompt[@]}" --num_images $num_images --seed $seed --output_dir $output_dir
+
+# n_iter=3
+# for branch_size in 4 3; do
+#     for pred_xstart_scale in 0.2 0.25 0.3 0.35; do
+#         python inference.py --dsg --guidance_rate $guidance_rate --pred_xstart_scale $pred_xstart_scale --n_iter $n_iter --search_method $search_method  --save_images --num_prompts $num_prompts --reward_fn $reward_fn  --t_start $t_start --t_end $t_end --active_size $active_size --branch_size $branch_size  --prompt "${prompt[@]}" --num_images $num_images --seed $seed --output_dir $output_dir
+#     done
+# done
+
+n_iter=2
+for branch_size in 4; do
+    for pred_xstart_scale in 0.25 0.3; do
+        python inference.py --dsg --guidance_rate $guidance_rate --pred_xstart_scale $pred_xstart_scale --n_iter $n_iter --search_method $search_method  --save_images --num_prompts $num_prompts --reward_fn $reward_fn  --t_start $t_start --t_end $t_end --active_size $active_size --branch_size $branch_size  --prompt "${prompt[@]}" --num_images $num_images --seed $seed --output_dir $output_dir
+    done
+done
+
+# n_iter=4
+# for branch_size in 2; do
+#     for pred_xstart_scale in 0.1 0.15 0.2 0.25 0.3; do
+#         python inference.py --dsg --guidance_rate $guidance_rate --pred_xstart_scale $pred_xstart_scale --n_iter $n_iter --search_method $search_method  --save_images --num_prompts $num_prompts --reward_fn $reward_fn  --t_start $t_start --t_end $t_end --active_size $active_size --branch_size $branch_size  --prompt "${prompt[@]}" --num_images $num_images --seed $seed --output_dir $output_dir
+#     done
+# done
+
+
 
 
 
 
 # # SC
-branch_size=6
+branch_size=8
 search_method=TreeG-SC
 # python inference.py --search_method $search_method  --save_images --num_prompts $num_prompts --reward_fn $reward_fn  --t_start $t_start --t_end $t_end --active_size $active_size --branch_size $branch_size  --prompt "${prompt[@]}" --num_images $num_images --seed $seed --output_dir $output_dir
